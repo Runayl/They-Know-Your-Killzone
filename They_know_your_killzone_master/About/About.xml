@@ -1,0 +1,25 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+	<name>they know your killzone</name>
+	<author>Runay</author>
+	<supportedVersions>
+		<li>1.6</li>
+	</supportedVersions>
+	<packageId>runay.ai</packageId>
+	<modDependenciesByVersion>
+	</modDependenciesByVersion>
+
+	<loadAfter>
+		<li>Ludeon.RimWorld</li>
+		<li>Ludeon.RimWorld.Royalty</li>
+		<li>brrainz.harmony</li>
+		<li>CETeam.CombatExtended</li>
+	</loadAfter>
+
+	<incompatibleWith>
+		<li>brrainz.carefulraids</li>
+		<li>brrainz.lineofsightfix</li>
+	</incompatibleWith>
+
+	<description>Rimworld is a storyteller.. but now it's a skill test.</description>
+</ModMetaData>

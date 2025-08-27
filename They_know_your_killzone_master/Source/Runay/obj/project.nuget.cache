@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "JyEW1Edp+GE=",
+  "success": true,
+  "projectFilePath": "E:\\SteamLibrary\\steamapps\\common\\RimWorld\\Mods\\They_know_your_killzone_master\\Source\\Runay\\RunayAI.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\82103\\.nuget\\packages\\krafs.rimworld.ref\\1.6.4543\\krafs.rimworld.ref.1.6.4543.nupkg.sha512",
+    "C:\\Users\\82103\\.nuget\\packages\\lib.harmony\\2.4.1\\lib.harmony.2.4.1.nupkg.sha512"
+  ],
+  "logs": []
+}
