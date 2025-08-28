@@ -22,7 +22,7 @@
 		<OutputPath>..\..\1.6\Assemblies</OutputPath>
 		<OutputPath>..\..\1.6\Assemblies</OutputPath>
 		<DefineConstants>TRACE;NDEBUG</DefineConstants>
-		<WarningLevel>4</WarningLevel>
+		<WarningLevel>0</WarningLevel>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<TreatWarningsAsErrors>false</TreatWarningsAsErrors>
 	</PropertyGroup>
@@ -32,7 +32,10 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<TreatWarningsAsErrors>false</TreatWarningsAsErrors>
 		<DebugType>full</DebugType>
+		<WarningLevel>0</WarningLevel>
 	</PropertyGroup>	
+
+	
 	<ItemGroup>
 		<PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4543" GeneratePathProperty="true" />
 		<PackageReference Include="Lib.Harmony" Version="2.4.1.0" ExcludeAssets="runtime" />

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Defs>
+
+  <DutyDef>
+    <defName>Steal</defName>
+    <thinkNode Class="RunayAI.Patches.JobGiver_Steal" />
+    <alwaysShowWeapon>true</alwaysShowWeapon>
+  </DutyDef>
+
+  <DutyDef>
+    <defName>Escort</defName>
+    <thinkNode Class="ThinkNode_Duty">
+      <subNodes>
+        <li Class="JobGiver_FollowClose">
+          <followRadius>5</followRadius>
+        </li>
+        <li Class="JobGiver_AIFightEnemy" />
+      </subNodes>
+    </thinkNode>
+    <alwaysShowWeapon>true</alwaysShowWeapon>
+  </DutyDef>
+
+</Defs>

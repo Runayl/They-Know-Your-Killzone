@@ -1,0 +1,7 @@
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\Source\Runay\obj\Release\RunayAI.csproj.AssemblyReference.cache
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\Source\Runay\obj\Release\RunayAI.GeneratedMSBuildEditorConfig.editorconfig
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\Source\Runay\obj\Release\RunayAI.csproj.CoreCompileInputs.cache
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\1.6\Assemblies\RunayAI.dll
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\1.6\Assemblies\RunayAI.pdb
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\Source\Runay\obj\Release\RunayAI.dll
+E:\SteamLibrary\steamapps\common\RimWorld\Mods\They_know_your_killzone_master\Source\Runay\obj\Release\RunayAI.pdb

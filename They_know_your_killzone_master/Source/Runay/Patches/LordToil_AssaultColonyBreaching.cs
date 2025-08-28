@@ -13,10 +13,12 @@ namespace RunayAI.Patches
             static void Postfix(RimWorld.LordToil_AssaultColonyBreaching __instance)
             {
                 __instance.Data.maxRange = 65f;
+                BreachingUtility.currentLordForPatching = null;
             }
 
             static bool Prefix(RimWorld.LordToil_AssaultColonyBreaching __instance)
             {
+                BreachingUtility.currentLordForPatching = __instance.lord;
                 if (__instance.useAvoidGrid && __instance.lord.ownedPawns.Any(x => x.def.ToString().Matches("centipede")))
                 {
                     __instance.useAvoidGrid = false;

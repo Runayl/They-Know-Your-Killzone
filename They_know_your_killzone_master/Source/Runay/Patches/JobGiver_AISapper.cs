@@ -50,6 +50,13 @@ namespace RunayAI.Patches
                     return true;
                 }
 
+                var findPathMethod = AccessTools.Method(typeof(PathFinder), "FindPath", new[] { typeof(IntVec3), typeof(LocalTargetInfo), typeof(TraverseParms), typeof(PathEndMode) });
+                if (findPathMethod == null)
+                {
+                    Log.ErrorOnce("RunayAI Sapper: Could not find method PathFinder.FindPath via reflection. AI will not function correctly.", 8675309);
+                    return true;
+                }
+
                 IntVec3 intVec = pawn.mindState.duty.focus.Cell;
                 if (intVec.IsValid && (float)intVec.DistanceToSquared(pawn.Position) < 100f && intVec.GetRoom(pawn.Map) == pawn.GetRoom(RegionType.Set_All)
                     && intVec.WithinRegions(pawn.Position, pawn.Map, 9, TraverseMode.NoPassClosedDoors, RegionType.Set_Passable))
@@ -58,9 +65,9 @@ namespace RunayAI.Patches
                     return false;
                 }
 
-                if (pathCostCache.RemoveAll(x => x.attackTarget.ThreatDisabled(pawn) || x.attackTarget.Thing.Destroyed
-                    || (x.blockingThing == null && !x.pawn.Position.WithinRegions(x.cellBefore, pawn.Map, 9, TraverseMode.NoPassClosedDoors, RegionType.Set_Passable))
-                    || (x.blockingThing != null && !Utilities.CellBlockedFor(pawn, x.blockingThing.Position))) > 0)
+                if (pathCostCache.RemoveAll(x => x.attackTarget?.Thing == null || x.attackTarget.Thing.Destroyed || x.attackTarget.ThreatDisabled(pawn)
+                    || (x.blockingThing == null && (x.pawn?.Map == null || !x.pawn.Position.WithinRegions(x.cellBefore, x.pawn.Map, 9, TraverseMode.NoPassClosedDoors, RegionType.Set_Passable)))
+                    || (x.blockingThing != null && (x.pawn?.Map == null || !Utilities.CellBlockedFor(pawn, x.blockingThing.Position)))) > 0)
                 {
 #if DEBUG
                     Log.Message($"{pawn} Cache trimmed: {string.Join(",", pathCostCache.Select(x => x.attackTarget.Thing))}");
@@ -89,15 +96,45 @@ namespace RunayAI.Patches
                         b.def.defName.ToLower().Contains("generator"))))
                     .ToList();
 
-                int[] lateralOffsets = new int[] { 0, 2, -2, 4, -4 };
                 int allyCount = pawn.Map.mapPawns.AllPawnsSpawned.Count(p => p.Faction == pawn.Faction && !p.Downed);
 
                 var allies = pawn.Map.mapPawns.AllPawnsSpawned
                     .Where(p => p.Faction == pawn.Faction && p != pawn && p.Position.DistanceTo(pawn.Position) < 20)
                     .ToList();
 
+                int[] lateralOffsets = new int[] { 0, 2, -2, 4, -4 };
+
                 foreach (var target in highValueTargets)
                 {
+                    var dest = new LocalTargetInfo(target);
+                    PawnPath path = null;
+                    if (findPathMethod != null)
+                    {
+                        path = (PawnPath)findPathMethod.Invoke(pawn.Map.pathFinder, new object[] {
+                            pawn.Position,
+                            dest,
+                            TraverseParms.For(pawn, Danger.Deadly, TraverseMode.PassDoors, false),
+                            PathEndMode.Touch
+                        });
+                    }
+
+                    if (path != null && path.Found)
+                    {
+                        float pathTrapRisk = 0f;
+                        foreach (var cell in path.NodesReversed)
+                        {
+                            if (HasTrapIn3x3(cell, pawn.Map))
+                                pathTrapRisk += 100f;
+                        }
+
+                        if (pathTrapRisk < 50f)
+                        {
+                            Job gotoJob = JobMaker.MakeJob(JobDefOf.Goto, target.Position);
+                            gotoJob.expiryInterval = Rand.RangeInclusive(200, 400);
+                            candidates.Add((gotoJob, 200f - pathTrapRisk, $"Safe path to {target.LabelShort}"));
+                            continue; 
+                        }
+                    }
 
                     foreach (int offset in lateralOffsets)
                     {
@@ -107,12 +144,12 @@ namespace RunayAI.Patches
 
                         if (offset == 0)
                         {
-                            pathCells.AddRange(GetSafePathCells(pawn, start, target.Position, offset));
+                            pathCells.AddRange(GetPathCells(pawn, start, target.Position, offset));
                         }
                         else
                         {
-                            pathCells.AddRange(GetSafePathCells(pawn, start, mid, offset));
-                            pathCells.AddRange(GetSafePathCells(pawn, mid, target.Position, offset));
+                            pathCells.AddRange(GetPathCells(pawn, start, mid, offset));
+                            pathCells.AddRange(GetPathCells(pawn, mid, target.Position, offset));
                         }
 
                         bool nimble = pawn.story?.traits?.HasTrait(DefDatabase<TraitDef>.GetNamedSilentFail("Nimble")) ?? false;
@@ -134,15 +171,7 @@ namespace RunayAI.Patches
                             foreach (var nearCell in GenRadial.RadialCellsAround(cell, 3f, true))
                             {
                                 if (nearCell.InBounds(pawn.Map) && IsDefensiveStructureAt(nearCell, pawn.Map))
-                                    trapRisk += 40.0f;
-                            }
-
-                            for (int i = 0; i < GenAdj.AdjacentCells.Length; i++)
-                            {
-                                var adjCell = cell + GenAdj.AdjacentCells[i];
-                                if (!adjCell.InBounds(pawn.Map)) continue;
-                                if (IsTrapAt(adjCell, pawn.Map))
-                                    trapRisk += 30.0f;
+                                    defenseRisk += 1.0f;
                             }
 
                             foreach (var thing in cell.GetThingList(pawn.Map))
@@ -154,35 +183,40 @@ namespace RunayAI.Patches
                             defenseRisk += EvaluateDefensiveStructureRisk(pawn, cell);
                         }
                                                 
-                        float timeCost = pawn.Position.DistanceTo(target.Position) / 10f + wallBlock * 2.5f;
+                        float timeCost = pawn.Position.DistanceTo(target.Position) / 30f + wallBlock * 2.5f;
                         float baseScore = 2.0f;
                         float targetScore = EvaluateTarget(pawn, target);
 
                         float defensePenalty = defenseRisk > 1.5f ? 40.0f : 0f; 
 
                         float wallThicknessPenalty = CalculateWallThicknessPenalty(pawn, pathCells);
-                        float wallPenalty = wallBlock > 0 ? (25.0f + wallThicknessPenalty) : 0f;
 
+                        float wallPenalty = wallBlock > 0 ? (wallBlock * 20.0f + wallThicknessPenalty) : 0f;
 
-                        float trapPenalty = trapRisk * 5.0f; 
+                        float trapPenalty = trapRisk; 
+
+                        if (allyCount == 1 && wallBlock > 0)
+                        {
+                            baseScore += 20.0f;
+                        }
 
                         if (trapRisk > 2.0f) 
                         {
                             baseScore = Math.Max(0.1f, baseScore - 50.0f);
                         }
 
-                        if (trapRisk > 8.0f || (trapRisk > 3.0f && defenseRisk > 5.0f))
+                        if (pathCells.Count == 0)
                         {
                             continue;
                         }
 
-                        if (wallBlock == 0 && trapRisk == 0f && defenseRisk == 0f)
-                            baseScore += 35.0f;
+                        if (trapRisk > 80.0f || (trapRisk > 30.0f && defenseRisk > 5.0f))
+                        {
+                            continue;
+                        }
 
-                        bool addWidenJob = false;
-                        if (allyCount >= 3 && wallBlock > 0 && wallBlock <= 2 && offset != 0 && 
-                            trapRisk < 1.0f && defenseRisk < 2.0f)
-                            addWidenJob = true;
+                        if (wallBlock == 0 && trapRisk < 1.0f && defenseRisk < 1.0f)
+                            baseScore += 35.0f;
 
                             
                         if (wallBlock > 0 && trapRisk > 10.0f)
@@ -190,7 +224,7 @@ namespace RunayAI.Patches
                             continue;
                         }
 
-                        if (trapRisk > 40.0f || defenseRisk > 10.0f)
+                        if (trapRisk > 100.0f || defenseRisk > 10.0f)
                         {
                             continue;
                         }
@@ -200,7 +234,8 @@ namespace RunayAI.Patches
                             continue;
                         }
 
-                        float score = baseScore + targetScore - trapRisk - defenseRisk - timeCost - trapPenalty - defensePenalty - wallPenalty;
+
+                        float score = baseScore + targetScore - trapPenalty - defenseRisk - timeCost - defensePenalty - wallPenalty;
 
                         if (allyCount > 1)
                         {
@@ -215,27 +250,48 @@ namespace RunayAI.Patches
 
                         if (trapRisk > 3.0f)
                         {
-                            score -= 75.0f; 
+                            score -= 75.0f;
                         }
 
-                        if (trapRisk > 5.0f || (trapRisk > 2.0f && defenseRisk > 5.0f))
+                        if (trapRisk > 50.0f || (trapRisk > 20.0f && defenseRisk > 5.0f))
                         {
-                            continue; 
+                            continue;
                         }
 
                         Job job = null;
                         
-                        var dest = new LocalTargetInfo(target.Position);
-                        var findPathMethod = AccessTools.Method(typeof(PathFinder), "FindPath", new[] { typeof(IntVec3), typeof(LocalTargetInfo), typeof(TraverseParms), typeof(PathEndMode) });
-                        PawnPath path = null;
-                        if (findPathMethod != null)
+                        if (wallBlock > 0)
                         {
-                            path = (PawnPath)findPathMethod.Invoke(pawn.Map.pathFinder, new object[] {
-                                pawn.Position,
-                                dest,
-                                TraverseParms.For(pawn, Danger.Deadly, TraverseMode.PassDoors, false),
-                                PathEndMode.Touch
-                            });
+                            var optimalWall = FindOptimalWallToBreak(pawn, pathCells, allyCount);
+
+                            if (optimalWall != null)
+                            {
+                                if (optimalWall.def == ThingDefOf.Door)
+                                {
+                                    score += 50f;
+                                }
+
+                                PawnPath pathToWall = (PawnPath)findPathMethod.Invoke(pawn.Map.pathFinder, new object[] { pawn.Position, new LocalTargetInfo(optimalWall), TraverseParms.For(pawn, Danger.Deadly, TraverseMode.PassDoors, false), PathEndMode.Touch });
+                                if (pathToWall != null && pathToWall.Found)
+                                {
+                                    float pathTrapRisk = 0f;
+                                    foreach (var cell in pathToWall.NodesReversed)
+                                    {
+                                        if (HasTrapIn3x3(cell, pawn.Map))
+                                            pathTrapRisk += 100f;
+                                    }
+
+                                    if (pathTrapRisk > 40f)
+                                    {
+                                        continue;
+                                    }
+
+                                    score += trapPenalty;
+                                    score -= pathTrapRisk; 
+                                    job = (optimalWall.def.mineable && !StatDefOf.MiningSpeed.Worker.IsDisabledFor(pawn) && pawn.CanReserve(optimalWall)) 
+                                        ? JobMaker.MakeJob(JobDefOf.Mine, optimalWall) : JobMaker.MakeJob(JobDefOf.AttackMelee, optimalWall);
+                                }
+                            }
                         }
 
                         if (path != null && path.Found)
@@ -243,59 +299,67 @@ namespace RunayAI.Patches
                             float pathTrapRisk = 0f;
                             foreach (var cell in path.NodesReversed)
                             {
-                                if (IsDefensiveStructureAt(cell, pawn.Map))
-                                    pathTrapRisk += 2.0f;
+                                if (HasTrapIn3x3(cell, pawn.Map))
+                                    pathTrapRisk += 100f;
                             }
 
-                            if (pathTrapRisk < trapRisk)
+                            float pathLengthPenalty = path.TotalCost / 15f;
+                            float targetValue = EvaluateTarget(pawn, target);
+                            float gotoScore = 150f + targetValue - pathTrapRisk - pathLengthPenalty;
+
+                            if (pawn.Position != target.Position)
                             {
-                                if (pawn.Position != target.Position)
+                                if (pathTrapRisk < 1.0f)
                                 {
                                     Job bypassJob = JobMaker.MakeJob(JobDefOf.Goto, target.Position);
                                     bypassJob.expiryInterval = Rand.RangeInclusive(200, 400);
-                                    candidates.Add((bypassJob, score + 3.0f, $"Safe alternate path to {target.LabelShort}"));
+                                    candidates.Add((bypassJob, gotoScore, $"Safe alternate path to {target.LabelShort} (cost: {path.TotalCost})"));
                                 }
-                            }
-                        }
-
-
-                        if (addWidenJob)
-                        {
-                            var blocks = pathCells.Where(c => c.InBounds(pawn.Map))
-                                .SelectMany(c => c.GetThingList(pawn.Map))
-                                .Where(t => t is Building ed && (ed.def == ThingDefOf.Wall || ed.def == ThingDefOf.Door || ed.def.mineable)
-                                            && pawn.CanReserve(t) && !IsReservedByOtherSapper(t, pawn))
-                                .Take(2).ToList();
-
-                            foreach (var block in blocks)
-                            {
-                                if (block.def.mineable && !StatDefOf.MiningSpeed.Worker.IsDisabledFor(pawn))
-                                    job = JobMaker.MakeJob(JobDefOf.Mine, block);
-                                else if (block.def == ThingDefOf.Wall || block.def == ThingDefOf.Door)
-                                    job = JobMaker.MakeJob(JobDefOf.AttackMelee, block);
-
-                                if (job != null)
-                                {
-                                    job.expireRequiresEnemiesNearby = false;
-                                    job.expiryInterval = Rand.RangeInclusive(200, 400);
-                                    job.collideWithPawns = true;
-                                    candidates.Add((job, score + 2.0f, $"Widen path: break {block.LabelShort} at {block.Position} (score={score + 2.0f:F2})"));
-                                }
-                            }
-                        }
-                        else if (wallBlock > 0)
-                        {
-                             var optimalWall = FindOptimalWallToBreak(pawn, pathCells, allyCount);
-                            
-                            if (optimalWall != null)
-                            {
-                                if (optimalWall.def.mineable && !StatDefOf.MiningSpeed.Worker.IsDisabledFor(pawn) && pawn.CanReserve(optimalWall))
-                                    job = JobMaker.MakeJob(JobDefOf.Mine, optimalWall);
                                 else
                                 {
-                                    job = JobMaker.MakeJob(JobDefOf.AttackMelee, optimalWall);
+                                    Job trappedPathJob = JobMaker.MakeJob(JobDefOf.Goto, target.Position);
+                                    trappedPathJob.expiryInterval = Rand.RangeInclusive(200, 400);
+                                    candidates.Add((trappedPathJob, gotoScore, $"Trapped alternate path to {target.LabelShort} (risk: {pathTrapRisk}, cost: {path.TotalCost})"));
                                 }
                             }
+                        }
+                        else 
+                        {
+                            if (wallBlock > 0)
+                            {
+                                var optimalWall = FindOptimalWallToBreak(pawn, pathCells, allyCount);
+                                if (optimalWall != null)
+                                {
+                                    PawnPath pathToWall = (PawnPath)findPathMethod.Invoke(pawn.Map.pathFinder, new object[] { pawn.Position, new LocalTargetInfo(optimalWall), TraverseParms.For(pawn, Danger.Deadly, TraverseMode.PassDoors, false), PathEndMode.Touch });
+                                    if (pathToWall != null && pathToWall.Found)
+                                    {
+                                        float pathTrapRisk = 0f;
+                                        foreach (var cell in pathToWall.NodesReversed)
+                                        {
+                                            if (HasTrapIn3x3(cell, pawn.Map))
+                                                pathTrapRisk += 100f;
+                                        }
+
+                                        if (pathTrapRisk > 80f) 
+                                        {
+                                            continue;
+                                        }
+
+                                        Job sapJob = (optimalWall.def.mineable && !StatDefOf.MiningSpeed.Worker.IsDisabledFor(pawn) && pawn.CanReserve(optimalWall)) ? JobMaker.MakeJob(JobDefOf.Mine, optimalWall) : JobMaker.MakeJob(JobDefOf.AttackMelee, optimalWall);
+                                        sapJob.expireRequiresEnemiesNearby = false;
+                                        float distancePenalty = pathToWall.TotalCost / 6f;
+                                        float wallHpPenalty = optimalWall.HitPoints / 15f;
+                                        float sapScore = EvaluateTarget(pawn, target) + 15f - pathTrapRisk - distancePenalty - wallHpPenalty;
+                                        candidates.Add((sapJob, sapScore, $"Sap {optimalWall.LabelShort} to reach {target.LabelShort}"));
+                                    }
+                                }
+                            }
+                        }
+
+
+                        if (wallBlock > 0)
+                        {
+
                         }
                         else if (target is Pawn col && col.Downed && col.RaceProps.Humanlike)
                         {
@@ -309,88 +373,13 @@ namespace RunayAI.Patches
                         else if (target is Building bld)
                             job = JobMaker.MakeJob(JobDefOf.AttackMelee, target);
 
-                        if (job != null && !addWidenJob)
+                        if (job != null)
                         {
                             job.expireRequiresEnemiesNearby = false;
                             job.expiryInterval = Rand.RangeInclusive(200, 400);
                             job.collideWithPawns = true;
                             candidates.Add((job, score, $"Path({offset}) to {target.LabelShort} at {target.Position} (score={score:F2})"));
                         }
-                        
-                        
-                    }
-                }
-
-
-                if (allies.Count > 0)
-                {
-
-                    if (allies.Count >= 3)
-                    {
-                        var playerTargets = pawn.Map.mapPawns.AllPawnsSpawned
-                            .Where(p => p.Faction == Faction.OfPlayer && !p.Downed)
-                            .ToList();
-
-                        foreach (var target in playerTargets)
-                        {
-                            var flankPositions = GetFlankingPositions(target.Position, pawn.Position, allies.Count);
-
-                            foreach (var flankPos in flankPositions)
-                            {
-                                if (flankPos.InBounds(pawn.Map) && flankPos.Standable(pawn.Map) &&
-                                    !IsDefensiveStructureAt(flankPos, pawn.Map) && flankPos != pawn.Position) 
-                                {
-                                    Job flankJob = JobMaker.MakeJob(JobDefOf.Goto, flankPos);
-                                    flankJob.expiryInterval = Rand.RangeInclusive(200, 400);
-                                    flankJob.collideWithPawns = true;
-                                    candidates.Add((flankJob, 3.5f, $"Flank maneuver to {flankPos}"));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    var sharedTarget = allies
-                        .Where(a => a.CurJob != null && a.CurJob.def == JobDefOf.AttackMelee && a.CurJob.targetA.Thing != null)
-                        .GroupBy(a => a.CurJob.targetA.Thing)
-                        .OrderByDescending(g => g.Count())
-                        .FirstOrDefault();
-
-                    if (sharedTarget != null && sharedTarget.Count() >= 2)
-                    {
-                        Job groupAssault = JobMaker.MakeJob(JobDefOf.AttackMelee, sharedTarget.Key);
-                        groupAssault.expiryInterval = Rand.RangeInclusive(200, 400);
-                        groupAssault.collideWithPawns = true;
-                        candidates.Add((groupAssault, 4.5f, $"Group assault on {sharedTarget.Key.LabelShort}"));
-                    }
-
-                    int avgX = (int)allies.Append(pawn).Average(p => p.Position.x);
-                    int avgZ = (int)allies.Append(pawn).Average(p => p.Position.z);
-                    IntVec3 formationCenter = new IntVec3(avgX, 0, avgZ);
-
-                    if (formationCenter != pawn.Position && formationCenter.InBounds(pawn.Map) &&
-                        formationCenter.Standable(pawn.Map) && pawn.Position.DistanceTo(formationCenter) > 2.9f)
-                    {
-                        Job formationJob = JobMaker.MakeJob(JobDefOf.Goto, formationCenter);
-                        formationJob.expiryInterval = Rand.RangeInclusive(200, 400);
-                        formationJob.collideWithPawns = true;
-                        candidates.Add((formationJob, 2.5f, $"Advance in formation to {formationCenter}"));
-                    }
-                }
-
-                if (pawn.health?.summaryHealth?.SummaryHealthPercent < 0.4f)
-                {
-                    var lureCell = GenRadial.RadialCellsAround(pawn.Position, 10f, true)
-                        .Where(c => c.InBounds(pawn.Map) && IsDefensiveStructureAt(c, pawn.Map))
-                        .OrderBy(c => c.DistanceTo(pawn.Position))
-                        .FirstOrDefault();
-
-                    if (lureCell.IsValid && lureCell != pawn.Position) 
-                    {
-                        Job lureJob = JobMaker.MakeJob(JobDefOf.Goto, lureCell);
-                        lureJob.expiryInterval = Rand.RangeInclusive(200, 400);
-                        lureJob.collideWithPawns = true;
-                        candidates.Add((lureJob, 1.5f, $"Lure enemy to defensive structure at {lureCell}"));
                     }
                 }
 
@@ -408,12 +397,43 @@ namespace RunayAI.Patches
                                 if (!pawn.CanReach(edifice, PathEndMode.Touch, Danger.Deadly) || !pawn.CanReserve(edifice)) continue;
 
                                 if (candidates.Any(c => c.job.targetA.Thing == edifice)) continue;
+
                                 float trapRisk = 0f;
-                                foreach (var adj in GenAdj.CellsOccupiedBy(edifice))
+                                float timeCost;
+
+                                if (findPathMethod != null)
                                 {
-                                    if (IsTrapAt(adj, pawn.Map)) trapRisk += 1.0f;
+                                    PawnPath path_to_edifice = (PawnPath)findPathMethod.Invoke(pawn.Map.pathFinder, new object[] {
+                                        pawn.Position,
+                                        new LocalTargetInfo(edifice),
+                                        TraverseParms.For(pawn, Danger.Deadly, TraverseMode.PassDoors, false),
+                                        PathEndMode.Touch
+                                    });
+
+                                    if (path_to_edifice == null || !path_to_edifice.Found)
+                                    {
+                                        continue;
+                                    }
+
+                                    foreach (var pathCell in path_to_edifice.NodesReversed)
+                                    {
+                                        if (HasTrapIn3x3(pathCell, pawn.Map))
+                                        {
+                                            trapRisk += 100f;
+                                        }
+                                    }
+                                    timeCost = (path_to_edifice.TotalCost / 35f);
                                 }
-                                float timeCost = edifice.def.mineable ? 2.0f : 1.0f;
+                                else
+                                {
+                                    timeCost = pawn.Position.DistanceTo(edifice.Position) / 10f;
+                                }
+
+                                if (HasTrapIn3x3(edifice.Position, pawn.Map))
+                                {
+                                    trapRisk += 50f;
+                                }
+                                timeCost += edifice.def.mineable ? 2.0f : 1.0f;
                                 float playerThreat = edifice.def.mineable ? 0.5f : 1.5f;
                                 float score = playerThreat - trapRisk - timeCost;
                                 Job job = null;
@@ -422,23 +442,12 @@ namespace RunayAI.Patches
                                 else
                                     job = JobMaker.MakeJob(JobDefOf.AttackMelee, edifice);
                                     
-                                // if (job != null)
-                                // {
-                                //     job.expireRequiresEnemiesNearby = false;
-                                //     job.expiryInterval = 120;
-                                //     job.collideWithPawns = true;
-                                //     candidates.Add((job, score, $"Break {edifice.LabelShort} at {edifice.Position} (score={score:F2})"));
-                                // }
-
                                 if (job != null)
                                 {
-                                    if (!candidates.Any(c => c.job.targetA.Thing == job.targetA.Thing))
-                                    {
-                                        job.expireRequiresEnemiesNearby = false;
-                                        job.expiryInterval = Rand.RangeInclusive(200, 400);
-                                        job.collideWithPawns = true;
-                                        candidates.Add((job, score, $"Break {edifice.LabelShort} at {edifice.Position} (score={score:F2})"));
-                                    }
+                                    job.expireRequiresEnemiesNearby = false;
+                                    job.expiryInterval = 120;
+                                    job.collideWithPawns = true;
+                                    candidates.Add((job, score, $"Break {edifice.LabelShort} at {edifice.Position} (score={score:F2})"));
                                 }
                             }
                         }
@@ -452,10 +461,10 @@ namespace RunayAI.Patches
                     float fireRisk = 0f;
                     foreach (var cell in PointsOnLine(pawn.Position, baseEntry))
                     {
-                        if (IsTrapAt(cell, pawn.Map)) trapRisk += 1.0f;
+                        if (HasTrapIn3x3(cell, pawn.Map)) trapRisk += 10.0f;
                         fireRisk += EvaluateCellDanger(pawn, cell);
                     }
-                    float timeCost = pawn.Position.DistanceTo(baseEntry) / 10f;
+                    float timeCost = pawn.Position.DistanceTo(baseEntry) / 30f;
                     float playerThreat = 2.0f;
                     float score = playerThreat - trapRisk - fireRisk - timeCost;
                     Job job = JobMaker.MakeJob(JobDefOf.Goto, baseEntry);
@@ -469,7 +478,7 @@ namespace RunayAI.Patches
                 if (myRole == "tank")
                 {
                     var coverCell = GenRadial.RadialCellsAround(pawn.Position, 5f, true)
-                        .Where(c => c.InBounds(pawn.Map) && !IsTrapAt(c, pawn.Map) && c.Standable(pawn.Map))
+                        .Where(c => c.InBounds(pawn.Map) && !HasTrapIn3x3(c, pawn.Map) && c.Standable(pawn.Map))
                         .OrderBy(c => c.DistanceTo(pawn.Position))
                         .FirstOrDefault();
                     if (coverCell.IsValid && coverCell != pawn.Position)
@@ -491,7 +500,7 @@ namespace RunayAI.Patches
                         int dz = Math.Sign(pawn.Position.z - tank.Position.z);
                         var dir = new IntVec3(dx, 0, dz);
                         var behindTank = tank.Position - dir;
-                        if (behindTank.InBounds(pawn.Map) && behindTank.Standable(pawn.Map) && !IsTrapAt(behindTank, pawn.Map))
+                        if (behindTank.InBounds(pawn.Map) && behindTank.Standable(pawn.Map) && !HasTrapIn3x3(behindTank, pawn.Map))
                         {
                             fallback = behindTank;
                             break;
@@ -506,23 +515,13 @@ namespace RunayAI.Patches
                     }
                 }
 
-                else if (myRole == "support")
+                var sapperGroup = pawn.Map.mapPawns.AllPawnsSpawned.Where(p => p.Faction == pawn.Faction && p != pawn && p.Position.DistanceTo(pawn.Position) < 15).ToList();
+                if (sapperGroup.Count >= 2)
                 {
-                    var downedAlly = pawn.Map.mapPawns.AllPawnsSpawned.FirstOrDefault(p => p.Faction == pawn.Faction && p.Downed && p != pawn);
-                    if (downedAlly != null && pawn.CanReach(downedAlly, PathEndMode.Touch, Danger.Deadly))
-                    {
-                        Job rescueJob = JobMaker.MakeJob(JobDefOf.Rescue, downedAlly);
-                        rescueJob.expiryInterval = Rand.RangeInclusive(200, 400);
-                        rescueJob.collideWithPawns = true;
-                        candidates.Add((rescueJob, 3.0f, $"Support rescue {downedAlly.LabelShort} at {downedAlly.Position}"));
-                    }
-                }
-
-                var sapperGroup = pawn.Map.mapPawns.AllPawnsSpawned.Where(p => p.Faction == pawn.Faction && p != pawn && p.Position.DistanceTo(pawn.Position) < 15);
-                if (sapperGroup.Count() >= 2)
-                {
-                    var targetColonist = pawn.Map.mapPawns.AllPawnsSpawned.Where(p => p.Faction == Faction.OfPlayer && !p.Downed)
-                        .OrderBy(p => sapperGroup.Average(s => s.Position.DistanceTo(p.Position))).FirstOrDefault();
+                    var targetColonist = pawn.Map.mapPawns.AllPawnsSpawned
+                        .Where(p => p.Faction == Faction.OfPlayer && !p.Downed && pawn.CanReach(p, PathEndMode.Touch, Danger.Deadly))
+                        .OrderBy(p => sapperGroup.Average(s => s.Position.DistanceTo(p.Position)))
+                        .FirstOrDefault();
                     if (targetColonist != null)
                     {
                         Job groupAssault = JobMaker.MakeJob(JobDefOf.AttackMelee, targetColonist);
@@ -566,7 +565,7 @@ namespace RunayAI.Patches
                 }
                 else
                 {
-                    IntVec3 wanderDest = CellFinder.RandomClosewalkCellNear(pawn.Position, pawn.Map, 8, c => !IsTrapAt(c, pawn.Map));
+                    IntVec3 wanderDest = CellFinder.RandomClosewalkCellNear(pawn.Position, pawn.Map, 8, c => !HasTrapIn3x3(c, pawn.Map));
 
                     if (wanderDest.IsValid && wanderDest != pawn.Position)
                     {
@@ -668,7 +667,7 @@ namespace RunayAI.Patches
 
                 if (__result == null)
                 {
-                    IntVec3 wanderDest = CellFinder.RandomClosewalkCellNear(pawn.Position, pawn.Map, 8, c => !IsTrapAt(c, pawn.Map));
+                    IntVec3 wanderDest = CellFinder.RandomClosewalkCellNear(pawn.Position, pawn.Map, 8, c => !HasTrapIn3x3(c, pawn.Map));
                     if (wanderDest.IsValid && wanderDest != pawn.Position)
                     {
                         __result = JobMaker.MakeJob(JobDefOf.Goto, wanderDest);
@@ -693,11 +692,6 @@ namespace RunayAI.Patches
 
                     if (thing is Building_Turret)
                         return true;
-
-                    if (thing.def.defName.ToLower().Contains("mine") || 
-                        thing.def.defName.ToLower().Contains("drone") ||
-                        thing.def.defName.ToLower().Contains("trap"))
-                        return true;
                 }
                 return false;
             }
@@ -715,12 +709,12 @@ namespace RunayAI.Patches
                     if (building != null && (building.def == ThingDefOf.Wall || building.def.mineable))
                     {
                         float hpRatio = building.HitPoints / (float)building.MaxHitPoints;
-                        penalty += hpRatio * 30.0f;
+                        penalty += hpRatio * 0.01f;
                         
                         int adjacentWalls = GenAdj.CellsAdjacent8Way(building)
                             .Count(c => c.InBounds(map) && c.GetFirstBuilding(map) is Building adjBuilding && 
                                     (adjBuilding.def == ThingDefOf.Wall || adjBuilding.def.mineable));
-                        penalty += adjacentWalls * 8.0f;
+                        penalty += adjacentWalls * 4.0f; 
                     }
                 }
                 
@@ -736,35 +730,45 @@ namespace RunayAI.Patches
                 if (pawn.CurJob != null && (pawn.CurJob.def == JobDefOf.AttackMelee || pawn.CurJob.def == JobDefOf.Mine))
                 {
                     var target = pawn.CurJob.targetA.Thing;
-                    if (target != null && (target.def == ThingDefOf.Wall || target.def.mineable))
+                    if (target != null && (target.def == ThingDefOf.Wall || target.def.mineable || target.def == ThingDefOf.Door))
                     {
                         currentTargetWall = target;
                     }
                 }
 
-                foreach (var cell in pathCells)
+                for (int i = 0; i < pathCells.Count; i++)
                 {
+                    var cell = pathCells[i];
                     if (!cell.InBounds(map)) continue;
 
                     var wall = cell.GetFirstBuilding(map);
-                    if (wall != null && (wall.def == ThingDefOf.Wall || wall.def.mineable) && pawn.CanReach(wall, PathEndMode.Touch, Danger.Deadly))
+                    if (wall != null && (wall.Faction == Faction.OfPlayer || wall.Faction == null) && (wall.def == ThingDefOf.Wall || wall.def.mineable || wall.def == ThingDefOf.Door) && pawn.CanReach(wall, PathEndMode.Touch, Danger.Deadly))
                     {
+                        if (candidateWalls.Any(c => c.wall == wall)) continue;
+
                         float score = 0f;
+
+                        if (wall.def == ThingDefOf.Door)
+                        {
+                            score += 100f;
+                        }
 
                         score += (1f - (wall.HitPoints / (float)wall.MaxHitPoints)) * 50f;
 
-                        int adjacentTrapCount = 0;
-                        for (int i = 0; i < 8; i++)
+                        if (HasTrapIn3x3(wall.Position, map))
                         {
-                            IntVec3 adjacentCell = cell + GenAdj.AdjacentCells[i];
-                            if (adjacentCell.InBounds(map) && IsTrapAt(adjacentCell, map))
-                            {
-                                adjacentTrapCount++;
-                            }
+                            score -= 300f;
                         }
 
-                        if (adjacentTrapCount > 0)
-                            score -= 50f * adjacentTrapCount;
+                        int nextCellIndex = i + 1;
+                        if (nextCellIndex < pathCells.Count)
+                        {
+                            IntVec3 cellBehind = pathCells[nextCellIndex];
+                            if (cellBehind.InBounds(map) && HasTrapIn3x3(cellBehind, map))
+                            {
+                                score -= 500f;
+                            }
+                        }
 
                         var closestColonist = map.mapPawns.FreeColonists.OrderBy(c => c.Position.DistanceTo(cell)).FirstOrDefault();
                         if (closestColonist != null)
@@ -779,31 +783,46 @@ namespace RunayAI.Patches
 
                         if (wall == currentTargetWall)
                         {
-                            score += 100f;
+                            score += 20f;
                         }
 
                         candidateWalls.Add((wall, score));
                     }
                 }
 
-                return candidateWalls.OrderByDescending(x => x.score).FirstOrDefault().wall;
+                if (!candidateWalls.Any()) return null;
+                return candidateWalls.OrderByDescending(x => x.score).First().wall;
             }
             private static bool IsReservedByOtherSapper(Thing thing, Pawn excludingPawn)
             {
                 foreach (var pawn in thing.Map.mapPawns.AllPawnsSpawned)
-                {
-                    if (pawn != excludingPawn 
-                        && pawn.CurJobDef == JobDefOf.Mine
+                {                    
+                    if (pawn != excludingPawn && pawn.Faction == excludingPawn.Faction
+                        && pawn.CurJob != null && pawn.CurJob.targetA.Thing == thing 
+                        && (pawn.CurJob.def == JobDefOf.Mine || pawn.CurJob.def == JobDefOf.AttackMelee)
                         && thing.Map.reservationManager.ReservedBy(thing, pawn))
                     {
                         return true;
                     }
                 }
-
-                
                 return false;
             }
 
+            private static bool IsPathValid(Pawn pawn, List<IntVec3> pathCells)
+            {
+                if (pathCells.Count == 0) return false;
+                
+                if (!pathCells[0].Walkable(pawn.Map) || !pathCells[pathCells.Count - 1].Walkable(pawn.Map))
+                    return false;
+                
+                foreach (var cell in pathCells)
+                {
+                    if (!cell.Walkable(pawn.Map) && !cell.GetThingList(pawn.Map).Any(t => t.def.mineable))
+                        return false;
+                }
+                
+                return true;
+            }
 
             private static float EvaluateDefensiveStructureRisk(Pawn pawn, IntVec3 cell)
             {
@@ -847,17 +866,7 @@ namespace RunayAI.Patches
                 if (blockingThing.Destroyed || !blockingThing.Spawned)
                     return null;
 
-                bool nearTrap = false;
-                foreach (var adj in GenRadial.RadialCellsAround(blockingThing.Position, 2.9f, true))
-                {
-                    if (adj.InBounds(pawn.Map) && IsTrapAt(adj, pawn.Map))
-                    {
-                        nearTrap = true;
-                        break;
-                    }
-                }
-
-                if (nearTrap)
+                if (HasTrapIn3x3(blockingThing.Position, pawn.Map))
                 {
                     IntVec3 fleeDest = CellFinder.RandomClosewalkCellNear(pawn.Position, pawn.Map, 10);
                     if (fleeDest == pawn.Position || !fleeDest.IsValid)
@@ -903,27 +912,20 @@ namespace RunayAI.Patches
                 return false;
             }
 
-            private static List<IntVec3> GetSafePathCells(Pawn pawn, IntVec3 start, IntVec3 end, int offset)
+            private static List<IntVec3> GetPathCells(Pawn pawn, IntVec3 start, IntVec3 end, int offset)
             {
                 var path = new List<IntVec3>();
 
                 if (offset == 0)
                 {
                     path.AddRange(PointsOnLine(start, end));
-                }
-                else
+                } else
                 {
                     IntVec3 mid = new IntVec3(start.x + offset, 0, start.z);
                     path.AddRange(PointsOnLine(start, mid));
                     path.AddRange(PointsOnLine(mid, end));
                 }
-
-                // 3x3 트랩 검사와 방어 구조물 반경 검사 모두 적용
-                return path
-                    .Where(cell => cell.InBounds(pawn.Map)
-                                && !HasTrapIn3x3(cell, pawn.Map)
-                                && !HasDefensiveStructureInArea(cell, pawn.Map, 2.9f))
-                    .ToList();
+                return path;
             }
 
             private static bool HasDefensiveStructureInArea(IntVec3 center, Map map, float radius = 2.9f)
@@ -1040,17 +1042,25 @@ namespace RunayAI.Patches
 
                 return weight;
             }
+            
+            private static bool IsWallAlreadyBreached(IntVec3 cell, Map map)
+            {
+                if (!cell.Walkable(map)) return false;
+
+                return true;
+            }
+
             private static List<IntVec3> GetFlankingPositions(IntVec3 targetPos, IntVec3 currentPos, int allyCount)
             {
                 var positions = new List<IntVec3>();
                 int flankers = Math.Min(allyCount, 4);
-                
+
                 IntVec3 toCurrent = currentPos - targetPos;
                 if (toCurrent.x == 0 && toCurrent.z == 0)
                 {
                     toCurrent = new IntVec3(1, 0, 0);
                 }
-                
+
                 IntVec3 primaryDirection;
                 if (Math.Abs(toCurrent.x) > Math.Abs(toCurrent.z))
                 {
@@ -1060,15 +1070,15 @@ namespace RunayAI.Patches
                 {
                     primaryDirection = new IntVec3(0, 0, Math.Sign(toCurrent.z));
                 }
-                
+
                 IntVec3 perpendicular1 = new IntVec3(primaryDirection.z, 0, primaryDirection.x);
                 IntVec3 perpendicular2 = new IntVec3(-primaryDirection.z, 0, -primaryDirection.x);
-                
+
                 positions.Add(targetPos + primaryDirection * 5);
                 positions.Add(targetPos - primaryDirection * 5);
                 positions.Add(targetPos + perpendicular1 * 5);
                 positions.Add(targetPos + perpendicular2 * 5);
-                
+
                 return positions.Take(flankers).ToList();
             }
         }

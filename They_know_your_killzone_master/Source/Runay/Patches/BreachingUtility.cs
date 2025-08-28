@@ -14,9 +14,7 @@ namespace RunayAI.Patches
 {
     public class BreachingUtility
     {
-        public static bool breachMineables = false;
-        public static bool enforceMinimumRange = true;
-        public static bool doneReset = false;
+        public static Lord currentLordForPatching;
 
         public static class BreachRangedCastPositionFinder_SafeForRangedCast
         {
@@ -24,6 +22,18 @@ namespace RunayAI.Patches
             {
                 var instance = Traverse.Create(__instance);
                 var verb = instance.Field("verb").GetValue<Verb>();
+                var caster = verb?.CasterPawn;
+                if (caster == null)
+                {
+                    __result = true;
+                    return false;
+                }
+                var breachData = caster.GetLord()?.GetCustomBreachData();
+                if (breachData == null)
+                {
+                    __result = true;
+                    return false;
+                }
                 var map = instance.Field("breachingGrid").GetValue<BreachingGrid>().Map;
                 if (!c.InBounds(map) || !c.Walkable(map))
                 { 
@@ -51,7 +61,7 @@ namespace RunayAI.Patches
                 }
                 var target = instance.Field("target").GetValue<Thing>();
                 var effective = verb.EffectiveRange * verb.EffectiveRange / modifier;
-                __result = !enforceMinimumRange || target.Position.DistanceToSquared(c) > effective;
+                __result = !breachData.enforceMinimumRange || target.Position.DistanceToSquared(c) > effective;
 
                 if (__result && verb.EffectiveRange > 30)
                 {
@@ -97,28 +107,30 @@ namespace RunayAI.Patches
             static void Postfix(Pawn pawn, ref bool __result)
             {
                 var lord = pawn.GetLord();
+                if (lord == null) return;
+
                 Log.Message($"result {__result} {lord.ownedPawns.Any(x => x.CurJob?.def == JobDefOf.UseVerbOnThing)}");
                 if (!__result && !lord.ownedPawns.Any(x => x.CurJob?.def == JobDefOf.UseVerbOnThing))
                 {
-                    var data = LordDataFor(lord);
-                    data.Reset();
+                    var breachData = lord.GetCustomBreachData();
+                    breachData.Reset();
 #if DEBUG
                     Log.Message("Could not find breach cast pos for any breacher so resetting breach data");
 #endif
-                    if (enforceMinimumRange)
+                    if (breachData.enforceMinimumRange)
                     {
-                        enforceMinimumRange = false;
+                        breachData.enforceMinimumRange = false;
 #if DEBUG
                         Log.Message("Could not find breach cast pos so disabling minimum range check");
 #endif
-                    } else if (doneReset && !breachMineables)
+                    } else if (breachData.doneReset && !breachData.breachMineables)
                     {
-                        breachMineables = true;
+                        breachData.breachMineables = true;
 #if DEBUG
                         Log.Message("Could not find cast after reset and no minrange so breachMineables");
 #endif
                     }
-                    doneReset = true;
+                    breachData.doneReset = true;
                 }
             }
         }
@@ -128,9 +140,10 @@ namespace RunayAI.Patches
         {
             static void Postfix(ref Thing __result)
             {
-                if (__result == null && !breachMineables)
+                var breachData = currentLordForPatching?.GetCustomBreachData();
+                if (breachData != null && __result == null && !breachData.breachMineables)
                 {
-                    breachMineables = true;
+                    breachData.breachMineables = true;
 #if DEBUG
                     Log.Message("Could not find breach building so breachMineables");
 #endif
@@ -143,10 +156,11 @@ namespace RunayAI.Patches
         {
             static void Postfix(Map map, IntVec3 c, ref bool __result)
             {
-                if (__result)
+                var breachData = currentLordForPatching?.GetCustomBreachData();
+                if (breachData != null && __result)
                 {
                     Building edifice = c.GetEdifice(map);
-                    __result = edifice?.Faction == Faction.OfPlayer || (breachMineables && edifice.def.mineable);
+                    __result = edifice?.Faction == Faction.OfPlayer || (breachData.breachMineables && edifice.def.mineable);
                 }
             }
         }

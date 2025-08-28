@@ -1,34 +1,25 @@
 ﻿using HarmonyLib;
 using RimWorld;
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Threading;
-using Unity.Baselib.LowLevel;
 using UnityEngine;
-using UnityEngine.SocialPlatforms;
 using Verse;
 using Verse.AI;
-using Verse.Noise;
 
 namespace RunayAI.Patches
 {
     [HarmonyPatch(typeof(AvoidGrid), "Regenerate")]
     public static class AvoidGrid_Regenerate
     {
-        static Traverse instance;
         static int counter = 0;
-        static ByteGrid tempGrid;
         public static int lastUpdateTicks = 0;
         const bool runMannableCheck = false;
 
         static bool Prefix(Verse.AI.AvoidGrid __instance)
         {
-            instance = Traverse.Create(__instance);
-
-            var gridDirty = instance.Field("gridDirty");
+            var instanceTraverse = Traverse.Create(__instance);
+            var gridDirty = instanceTraverse.Field("gridDirty");
             if (lastUpdateTicks != 0 && (Find.TickManager.TicksGame - lastUpdateTicks) / 60 < 5)
             {
                 gridDirty.SetValue(false);
@@ -105,7 +96,7 @@ namespace RunayAI.Patches
                         }
                     }
                 }
-                instance.Method("ExpandAvoidGridIntoEdifices").GetValue();
+                instanceTraverse.Method("ExpandAvoidGridIntoEdifices").GetValue();
                 //Log.Message($"Count: {counter}");
             }
             catch (Exception e)
@@ -124,29 +115,31 @@ namespace RunayAI.Patches
                 return;
             }
             float range = verb.verbProps.range;            
-            tempGrid = new ByteGrid(map);
+            ByteGrid localTempGrid = new ByteGrid(map);
+            Traverse instanceTraverse = Traverse.Create(__instance);
+
+            Func<IntVec3, bool> incrementer = (IntVec3 cell) =>
+            {
+                if (localTempGrid[cell] == 0)
+                {
+                    instanceTraverse.Method("IncrementAvoidGrid", cell, Init.settings.costLOS).GetValue();
+                    IncrementLocalAvoidGrid(localTempGrid, cell, Init.settings.costLOS);
+                }
+                return true;
+            };
+
             float num = verb.verbProps.EffectiveMinRange(true);
             int num2 = GenRadial.NumCellsInRadius(range);
             for (int i = num2; i > (num < 1f ? 0 : GenRadial.NumCellsInRadius(num)); i--)
             {
                 IntVec3 intVec = pos + GenRadial.RadialPattern[i];
                 if (intVec.InBounds(map) && intVec.WalkableByNormal(map)
-                    && tempGrid[intVec] == 0
-                    && GenSight.LineOfSight(pos, intVec, map, true, IncrementAvoidGrid, 0, 0))
+                    && localTempGrid[intVec] == 0
+                    && GenSight.LineOfSight(pos, intVec, map, true, incrementer, 0, 0))
                 {
                     counter++;
                 }
             }
-        }
-
-        private static bool IncrementAvoidGrid(IntVec3 cell)
-        {
-            if (tempGrid[cell] == 0)
-            {
-                instance.Method("IncrementAvoidGrid", cell, Init.settings.costLOS).GetValue();
-                IncrementLocalAvoidGrid(tempGrid, cell, Init.settings.costLOS);
-            }
-            return true;
         }
 
         private static void IncrementLocalAvoidGrid(ByteGrid grid, IntVec3 c, int num)

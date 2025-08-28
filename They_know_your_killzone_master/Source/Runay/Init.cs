@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -47,7 +47,7 @@ namespace RunayAI
 
         public Init(ModContentPack contentPack) : base(contentPack)
         {
-            Log.Message("THEYAREKNOWYOURKILLZONE...");
+            Log.Message("THEYAREKNOWYOURKILLZONE...v0.1");
             harmony  = new Harmony("Runay.ai");
             combatExtended = LoadedModManager.RunningMods.FirstOrDefault(m => m.PackageId.Matches("CETeam.CombatExtended")) != null;
             if (combatExtended)
@@ -61,8 +61,8 @@ namespace RunayAI
             }
             settings = GetSettings<RunaySettings>();
             harmony.PatchAll();
-            patchPrivateClass(typeof(BreachingUtility), typeof(Patches.BreachingUtility.BreachRangedCastPositionFinder_TryFindRangedCastPosition), "RimWorld.BreachingUtility+BreachRangedCastPositionFinder", "TryFindRangedCastPosition", "Postfix");
-            patchPrivateClass(typeof(BreachingUtility), typeof(Patches.BreachingUtility.BreachRangedCastPositionFinder_SafeForRangedCast), "RimWorld.BreachingUtility+BreachRangedCastPositionFinder", "SafeForRangedCast", "Prefix");
+            patchPrivateClass(typeof(RimWorld.BreachingUtility), typeof(Patches.BreachingUtility.BreachRangedCastPositionFinder_TryFindRangedCastPosition), "RimWorld.BreachingUtility+BreachRangedCastPositionFinder", "TryFindRangedCastPosition", "Postfix");
+            patchPrivateClass(typeof(RimWorld.BreachingUtility), typeof(Patches.BreachingUtility.BreachRangedCastPositionFinder_SafeForRangedCast), "RimWorld.BreachingUtility+BreachRangedCastPositionFinder", "SafeForRangedCast", "Prefix");
             patchPrivateMethod(typeof(RimWorld.JobGiver_AIFightEnemy), typeof(Patches.JobGiver_AIFightEnemy.JobGiver_AIFightEnemy_TryGiveJob), "TryGiveJob", "Prefix");
             patchPrivateMethod(typeof(RimWorld.JobGiver_AIFightEnemy), typeof(Patches.JobGiver_AIFightEnemy.JobGiver_AIFightEnemy_TryGiveJob), "TryGiveJob", "Postfix");
         }
